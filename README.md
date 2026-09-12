@@ -35,8 +35,11 @@
 - [Features](#-features)
 - [Application Preview](#-application-preview)
 - [Tech Stack](#-tech-stack)
+- [System Design & Architecture](#-system-design--architecture)
 - [Folder Structure](#-folder-structure)
+- [Prerequisites](#-prerequisites)
 - [Installation](#-installation)
+- [Available Scripts](#-available-scripts)
 - [Environment Variables](#-environment-variables)
 - [Routes](#-routes)
 - [Data Models](#-data-models)
@@ -44,6 +47,8 @@
 - [Image Uploads](#-image-uploads-cloudinary)
 - [Maps & Geocoding](#-maps--geocoding-mapbox)
 - [Error Handling & Validation](#-error-handling--validation)
+- [Security Considerations](#-security-considerations)
+- [Browser & Device Support](#-browser--device-support)
 - [Deployment](#-deployment)
 - [Common Issues & Fixes](#-common-issues--fixes)
 - [Interview Questions](#-interview-questions)
@@ -110,6 +115,18 @@ WanderLust provides an Airbnb-inspired rental experience where users can:
 🔗 **Try the live application:**
 https://wanderlust-1-lzc6.onrender.com/listings
 
+### 📸 Screenshots
+
+> Add screenshots or a short GIF walkthrough here to make the README more recruiter-friendly, e.g.:
+>
+> ```md
+> ![Homepage](./public/screenshots/home.png)
+> ![Listing Detail](./public/screenshots/listing-detail.png)
+> ![Create Listing Form](./public/screenshots/new-listing.png)
+> ```
+>
+> Save the actual screenshots into a `public/screenshots/` folder and update the paths above.
+
 ---
 
 ## 🛠️ Tech Stack
@@ -131,6 +148,162 @@ https://wanderlust-1-lzc6.onrender.com/listings
 | **Development Tools** | Nodemon, dotenv |
 | **Deployment** | Render |
 | **Version Control** | Git & GitHub |
+
+---
+
+## 🏗️ System Design & Architecture
+
+### High-Level Architecture
+
+WanderLust follows a classic **server-rendered MVC (Model–View–Controller)** architecture on top of a **monolithic Node.js/Express backend**. There is no separate frontend SPA — Express renders EJS templates on the server and sends fully-formed HTML to the browser, with a small amount of client-side JS (`map.js`, `script.js`) for interactivity (Mapbox rendering, form validation, etc.).
+
+```mermaid
+flowchart TD
+    subgraph Client["Browser (Client)"]
+        UI["EJS-rendered pages<br/>+ script.js / map.js"]
+    end
+
+    subgraph Server["Node.js / Express Server (app.js)"]
+        MW["Middleware Layer<br/>(sessions, flash, passport, method-override,<br/>isLoggedIn, isOwner, isAuthor, validateListing/Review)"]
+        RT["Routers<br/>routes/listing.js, review.js, user.js"]
+        CT["Controllers<br/>controllers/listings.js, review.js, users.js"]
+        UT["Utils<br/>ExpressError.js, wrapAsync.js"]
+    end
+
+    subgraph Data["Data & External Services"]
+        DB[("MongoDB Atlas<br/>via Mongoose Models")]
+        SESS[("Session Store<br/>connect-mongo")]
+        CLOUD["Cloudinary<br/>Image Hosting"]
+        MAP["Mapbox<br/>Geocoding API"]
+    end
+
+    UI -- "HTTP Request" --> MW
+    MW --> RT
+    RT --> CT
+    CT --> UT
+    CT -- "CRUD ops" --> DB
+    MW -- "read/write session" --> SESS
+    CT -- "upload/delete image" --> CLOUD
+    CT -- "geocode location" --> MAP
+    CT -- "render EJS + data" --> UI
+```
+
+### Request Lifecycle
+
+1. **Client request** hits `app.js`, which boots Express and mounts global middleware (body parsing, `method-override`, static files, `express-session` + `connect-mongo`, `connect-flash`, Passport initialization).
+2. The request is matched against one of the three **routers** (`routes/listing.js`, `routes/review.js`, `routes/user.js`).
+3. Route-level middleware runs first — `isLoggedIn` (authentication gate), `isOwner` / `isAuthor` (authorization gate), and `validateListing` / `validateReview` (Joi schema validation from `schema.js`).
+4. The matching **controller function** (in `controllers/`) executes the actual business logic — querying Mongoose models, talking to Cloudinary/Mapbox, and preparing data for the view.
+5. Any error thrown (sync or async) is caught by `wrapAsync` and forwarded to Express's centralized error-handling middleware, which uses the custom `ExpressError` class and renders `views/error.ejs`.
+6. On success, the controller renders an **EJS view** (via `ejs-mate` for layout support) or redirects with a flash message.
+7. The browser receives HTML; `map.js` then calls the Mapbox GL JS API client-side to render the interactive map using the coordinates embedded in the page.
+
+### MVC Layer Responsibilities
+
+| Layer | Folder | Responsibility |
+|---|---|---|
+| **Model** | `models/` | Mongoose schemas for `Listing`, `Review`, `User`; define shape of data, relationships (`ref`/`populate`), and (for `User`) plug in `passport-local-mongoose`. |
+| **View** | `views/` | EJS templates rendered per-route; `includes/` for partials (navbar, footer, flash messages), `layouts/` for the shared boilerplate via `ejs-mate`. |
+| **Controller** | `controllers/` | Pure request-handling logic — no routing definitions here; receives `req/res`, talks to models & external APIs, decides what to render/redirect. |
+| **Router** | `routes/` | Declares URL paths + HTTP verbs, wires up middleware chains, and delegates to controller functions. |
+| **Middleware** | `middlewares.js` | Cross-cutting concerns: `isLoggedIn`, `isOwner`, `isAuthor`, `validateListing`, `validateReview`, and storing `req.originalUrl` for post-login redirects. |
+| **Validation Schema** | `schema.js` | Joi schemas used by the validation middleware to reject malformed listing/review payloads before they reach the controller. |
+| **Utils** | `utils/` | `ExpressError` (custom error class with status code + message) and `wrapAsync` (wraps async route handlers so rejected promises reach Express's error handler). |
+| **Config** | `cloudConfig.js` | Cloudinary SDK + Multer storage engine configuration, exported for use in listing routes/controllers. |
+| **Seed Data** | `init/` | `data.js` (sample listings) + `index.js` (script to seed MongoDB, run manually via `node init/index.js`). |
+
+### Data Model / Entity Relationship
+
+```mermaid
+erDiagram
+    USER ||--o{ LISTING : owns
+    USER ||--o{ REVIEW : writes
+    LISTING ||--o{ REVIEW : has
+
+    USER {
+        ObjectId _id
+        string username
+        string email
+        string hashedPassword
+    }
+    LISTING {
+        ObjectId _id
+        string title
+        string description
+        string image_url
+        string image_filename
+        number price
+        string location
+        string country
+        ObjectId owner FK
+        array reviews FK
+        object geometry
+    }
+    REVIEW {
+        ObjectId _id
+        string comment
+        number rating
+        ObjectId author FK
+        date createdAt
+    }
+```
+
+- `Listing.owner` references `User` (one owner per listing).
+- `Listing.reviews` is an array of `Review` ObjectIds (populated when a listing is fetched).
+- `Review.author` references `User`.
+- Deleting a `Listing` also cleans up its associated `Review` documents (via a Mongoose post-hook / manual cleanup in the delete controller), preventing orphaned reviews.
+
+### Authentication & Authorization Flow
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant M as Express Middleware
+    participant P as Passport (local strategy)
+    participant DB as MongoDB Atlas
+
+    B->>M: POST /login (username, password)
+    M->>P: passport.authenticate('local')
+    P->>DB: find user + verify hash (passport-local-mongoose)
+    DB-->>P: user document or error
+    P-->>M: success -> req.login() / failure -> flash error
+    M->>DB: persist session (connect-mongo)
+    M-->>B: redirect + session cookie
+
+    Note over B,M: Subsequent requests to protected routes
+    B->>M: GET /listings/new (with session cookie)
+    M->>M: isLoggedIn checks req.isAuthenticated()
+    alt not authenticated
+        M-->>B: redirect to /login + flash message
+    else authenticated
+        M-->>B: render protected view
+    end
+```
+
+- **Authentication** (who you are) is handled by Passport's local strategy + `passport-local-mongoose`, which salts/hashes passwords and manages the credential-verification logic.
+- **Authorization** (what you're allowed to do) is enforced separately per action: `isOwner` checks `listing.owner.equals(req.user._id)` before allowing edit/delete; `isAuthor` does the equivalent check on `review.author` before allowing review deletion.
+- Sessions are **stateful and server-side**, stored in MongoDB via `connect-mongo`, so they survive server restarts (unlike in-memory sessions) and scale across multiple server instances sharing the same database.
+
+### Image Upload Flow
+
+```mermaid
+flowchart LR
+    A["User submits listing form<br/>(multipart/form-data)"] --> B["Multer middleware<br/>parses file"]
+    B --> C["multer-storage-cloudinary<br/>engine"]
+    C --> D["Cloudinary API<br/>(cloudConfig.js)"]
+    D --> E["Cloudinary returns<br/>secure URL + public_id"]
+    E --> F["Listing.image = { url, filename }<br/>saved to MongoDB"]
+```
+
+Images are **never stored on the Express server's disk** — Multer streams the upload directly to Cloudinary via `multer-storage-cloudinary`, and only the returned URL/filename is persisted in MongoDB. This keeps the app stateless and safe to redeploy on ephemeral hosts like Render.
+
+### Why These Design Choices
+
+- **Server-rendered EJS over a separate frontend SPA** — simpler deployment (single Render service), no CORS/API-versioning overhead, and matches the scope of a learning project.
+- **MongoDB + Mongoose** — flexible schema fits variable listing data (geometry, nested owner/review refs) better than a rigid relational schema for this use case.
+- **Session-based auth (not JWT)** — simpler to reason about for a server-rendered app where the browser and server are tightly coupled; `connect-mongo` gives persistence without needing Redis.
+- **Centralized error handling (`ExpressError` + `wrapAsync`)** — avoids repetitive try/catch in every controller and guarantees consistent error pages.
+- **Cloudinary over local disk storage** — Render's filesystem is ephemeral (wiped on redeploy/restart), so any locally-stored upload would be lost; Cloudinary makes image storage durable and CDN-backed.
 
 ---
 
@@ -176,6 +349,19 @@ Wanderlust/
 ├── package.json
 └── README.md
 ```
+
+---
+
+## ✅ Prerequisites
+
+Make sure you have the following installed/available before setting up the project:
+
+- **Node.js** v16 or higher (v18+ recommended)
+- **npm** (bundled with Node.js)
+- A **MongoDB Atlas** account (or a local MongoDB instance) with a connection string
+- A **Cloudinary** account (cloud name, API key, API secret)
+- A **Mapbox** account with a public access token
+- **Git** for cloning the repository
 
 ---
 
@@ -226,6 +412,18 @@ The application will run at:
 ```
 http://localhost:8080
 ```
+
+---
+
+## 📜 Available Scripts
+
+| Command | Description |
+|---|---|
+| `npm start` | Starts the app in production mode (`node app.js`) — used by Render. |
+| `npm run dev` | (If configured) Starts the app with `nodemon` for auto-reload during development. |
+| `node init/index.js` | Seeds MongoDB with sample listing data from `init/data.js`. |
+
+> If `npm run dev` isn't yet defined in your `package.json`, add it as `"dev": "nodemon app.js"` for a smoother local dev loop.
 
 ---
 
@@ -359,6 +557,25 @@ A user contains:
 
 ---
 
+## 🔒 Security Considerations
+
+- **Password storage**: passwords are never stored in plain text — `passport-local-mongoose` salts and hashes them before saving.
+- **Secrets management**: all credentials (DB URL, Cloudinary keys, Mapbox token, session secret) live in `.env`, which is excluded from version control via `.gitignore`.
+- **Session security**: sessions are signed with `SECRET` and stored server-side in MongoDB rather than trusting client-side cookies with sensitive data.
+- **Authorization checks**: ownership/authorship is re-verified on every edit/delete request (`isOwner`, `isAuthor`), not just hidden in the UI — so a user can't bypass restrictions by calling the route directly.
+- **Input validation**: all incoming listing/review data is validated server-side with Joi (`schema.js`) before it touches the database, guarding against malformed or malicious payloads.
+- **Recommended hardening (not yet implemented)**: rate limiting on auth routes, `helmet` for secure HTTP headers, CSRF protection on forms, and input sanitization against NoSQL injection (`express-mongo-sanitize`). Worth listing under Future Scope if not already handled in code.
+
+---
+
+## 🌐 Browser & Device Support
+
+- Works on modern evergreen browsers (Chrome, Firefox, Edge, Safari).
+- Responsive layout via custom CSS — usable on both desktop and mobile viewports.
+- Interactive Mapbox map requires JavaScript enabled and a working network connection to load map tiles.
+
+---
+
 ## ☁️ Deployment
 
 The application is deployed using Render, with MongoDB Atlas as the database.
@@ -476,9 +693,9 @@ Contributions are welcome.
 
 ## 📄 License
 
-This project is open-sourced for learning purposes.
+This project is open-sourced for learning purposes. Feel free to explore, learn from, and build upon it.
 
-Feel free to explore, learn from, and build upon it.
+> **Note:** No formal OSI license (e.g. MIT) is currently attached to this repository. If you want others to be able to reuse the code with clear legal permission, add a `LICENSE` file — MIT is the most common choice for learning/portfolio projects like this one.
 
 <p align="center">
   ⭐ If you found this project helpful, consider giving it a star on GitHub!
